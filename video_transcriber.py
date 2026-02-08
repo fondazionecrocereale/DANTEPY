@@ -1,0 +1,784 @@
+
+import yt_dlp
+import json
+import os
+from pydub import AudioSegment
+from pydub.silence import split_on_silence
+from deep_translator import GoogleTranslator
+import re
+import math
+import tempfile
+from typing import List, Dict, Any
+import time
+import subprocess
+
+import whisper
+
+class VideoTranscriber:
+    def __init__(self):
+        print("Cargando modelo Whisper (esto puede tardar un poco la primera vez)...")
+        self.model = whisper.load_model("small")
+        self.temp_dir = tempfile.mkdtemp()
+        
+    def _split_long_segment(self, segment, max_chars=80):
+        """
+        Divide un segmento largo en partes más pequeñas y legibles.
+        Respetando los tiempos originales y dividiendo en puntos naturales.
+        """
+        text = segment['text']
+        start_time = segment['startTime']
+        end_time = segment['endTime']
+        
+        # Si el texto es suficientemente corto, no dividir
+        if len(text) <= max_chars:
+            return [segment]
+        
+        # Convertir tiempos a milisegundos para cálculos
+        start_ms = self._time_to_milliseconds(start_time)
+        end_ms = self._time_to_milliseconds(end_time)
+        total_duration = end_ms - start_ms
+        
+        # Dividir el texto en frases naturales
+        sentences = self._split_into_sentences(text)
+        
+        if len(sentences) == 1:
+            # Si es una sola frase muy larga, dividir por palabras
+            words = text.split()
+            if len(words) <= 10:
+                return [segment]
+            
+            # Dividir en grupos de palabras
+            word_groups = self._split_words_into_groups(words, max_chars)
+            segments = []
+            
+            for i, group in enumerate(word_groups):
+                group_text = ' '.join(group)
+                group_duration = (len(group_text) / len(text)) * total_duration
+                
+                if i == 0:
+                    group_start = start_ms
+                else:
+                    # Calcular el tiempo de inicio basado en el tiempo de fin del segmento anterior
+                    prev_end_time = self._time_to_milliseconds(segments[-1]['endTime'])
+                    group_start = prev_end_time
+                
+                group_end = group_start + group_duration
+                
+                # Re-traducir cada segmento dividido
+                translation_en = self.translate_text(group_text, 'en')
+                translation_pt = self.translate_text(group_text, 'pt')
+                translation_es = self.translate_text(group_text, 'es')
+                
+                segments.append({
+                    'text': group_text,
+                    'startTime': self._milliseconds_to_time(group_start),
+                    'endTime': self._milliseconds_to_time(group_end),
+                    'translation': translation_es,      # Traducción del texto de este segmento
+                    'translationPR': translation_pt,   # Traducción del texto de este segmento
+                    'translationEN': translation_en,   # Traducción del texto de este segmento
+                    'isWordKey': segment['isWordKey']
+                })
+            
+            # Ajustar el último segmento para que coincida exactamente con el tiempo final
+            if segments:
+                segments[-1]['endTime'] = end_time
+            
+            return segments
+        
+        else:
+            # Dividir por frases naturales
+            segments = []
+            current_start = start_ms
+            
+            for i, sentence in enumerate(sentences):
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+                
+                # Calcular duración proporcional de la frase
+                sentence_ratio = len(sentence) / len(text)
+                sentence_duration = sentence_ratio * total_duration
+                
+                sentence_end = current_start + sentence_duration
+                
+                # Ajustar el último segmento para que coincida exactamente
+                if i == len(sentences) - 1:
+                    sentence_end = end_ms
+                
+                # Re-traducir cada frase dividida
+                translation_en = self.translate_text(sentence, 'en')
+                translation_pt = self.translate_text(sentence, 'pt')
+                translation_es = self.translate_text(sentence, 'es')
+                
+                segments.append({
+                    'text': sentence,
+                    'startTime': self._milliseconds_to_time(current_start),
+                    'endTime': self._milliseconds_to_time(sentence_end),
+                    'translation': translation_es,      # Traducción del texto de esta frase
+                    'translationPR': translation_pt,   # Traducción del texto de esta frase
+                    'translationEN': translation_en,   # Traducción del texto de esta frase
+                    'isWordKey': segment['isWordKey']
+                })
+                
+                current_start = sentence_end
+            
+            return segments
+    
+    def _split_into_sentences(self, text):
+        """Divide el texto en frases naturales usando puntuación italiana."""
+        # Patrones de puntuación italiana
+        sentence_endings = r'[.!?]+'
+        sentences = re.split(sentence_endings, text)
+        return [s.strip() for s in sentences if s.strip()]
+    
+    def _split_words_into_groups(self, words, max_chars):
+        """Divide palabras en grupos que no excedan max_chars."""
+        groups = []
+        current_group = []
+        current_length = 0
+        
+        for word in words:
+            word_length = len(word) + 1  # +1 por el espacio
+            
+            if current_length + word_length <= max_chars:
+                current_group.append(word)
+                current_length += word_length
+            else:
+                if current_group:
+                    groups.append(current_group)
+                current_group = [word]
+                current_length = word_length
+        
+        if current_group:
+            groups.append(current_group)
+        
+        return groups
+    
+    def _time_to_milliseconds(self, time_str):
+        """Convierte tiempo en formato HH:MM:SS.mmm a milisegundos."""
+        try:
+            # Formato: HH:MM:SS.mmm
+            parts = time_str.split(':')
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            seconds_parts = parts[2].split('.')
+            seconds = int(seconds_parts[0])
+            milliseconds = int(seconds_parts[1]) if len(seconds_parts) > 1 else 0
+            
+            total_ms = (hours * 3600 + minutes * 60 + seconds) * 1000 + milliseconds
+            return total_ms
+        except:
+            return 0
+    
+    def _milliseconds_to_time(self, ms):
+        """Convierte milisegundos a formato HH:MM:SS.mmm."""
+        total_seconds = int(ms // 1000)
+        milliseconds = int(ms % 1000)
+        
+        hours = int(total_seconds // 3600)
+        minutes = int((total_seconds % 3600) // 60)
+        seconds = int(total_seconds % 60)
+        
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+    
+    def _optimize_subtitles_for_ui(self, subtitles, max_chars=80):
+        """
+        Optimiza los subtítulos para mejor legibilidad en la UI.
+        Divide segmentos largos en partes más pequeñas.
+        """
+        optimized_subtitles = []
+        
+        for subtitle in subtitles:
+            # Dividir segmentos largos
+            split_segments = self._split_long_segment(subtitle, max_chars)
+            optimized_subtitles.extend(split_segments)
+        
+        return optimized_subtitles
+
+    def download_youtube_video(self, url: str, output_path: str = None) -> tuple:
+        """Descarga un video de YouTube y extrae el audio, retorna también metadatos"""
+        if output_path is None:
+            output_path = os.path.join(self.temp_dir, "audio.wav")
+            
+        # Try multiple format options in order of preference
+        format_options = [
+            'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
+            'bestaudio/best',
+            'best[height<=480]/best'
+        ]
+
+        for fmt in format_options:
+            ydl_opts = {
+                'format': fmt,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'wav',
+                    'preferredquality': '192',
+                }],
+                'outtmpl': output_path.replace('.wav', ''),
+                # Configuraciones adicionales para evitar bloqueos
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+                'no_warnings': False,
+                'quiet': False,
+                'verbose': False,
+                'extract_flat': False,
+                'skip_download': False,
+                # Headers para simular un navegador real
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-us,en;q=0.5',
+                    'Sec-Fetch-Mode': 'navigate',
+                },
+                # Opciones adicionales para YouTube
+                'age_limit': None,
+                'geo_bypass': True,
+                'geo_bypass_country': 'US',
+                # Additional options for problematic videos
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android', 'web'],
+                        'player_skip': ['js', 'configs'],
+                    }
+                }
+            }
+
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # Obtener información del video
+                    info = ydl.extract_info(url, download=False)
+                    video_title = info.get('title', 'Video de YouTube')
+                    thumbnail_url = info.get('thumbnail', '')
+                    
+                    # Extract author/channel info
+                    channel_url = info.get('channel_url') or info.get('uploader_url') or ""
+                    duration = info.get('duration', 0)
+                    
+                    # Extract categories
+                    categories = info.get('categories', [])
+                    category = categories[0] if categories else "transcripción"
+                    
+                    # Descargar el audio
+                    ydl.download([url])
+
+                    # Si yt-dlp no devolvió la duración, intentar obtenerla del archivo de audio
+                    if not duration or duration == 0:
+                        try:
+                            print("⚠️ Duración no encontrada en metadatos, calculando desde el archivo de audio...")
+                            audio = AudioSegment.from_file(output_path)
+                            duration = len(audio) / 1000.0  # pydub devuelve milisegundos
+                            print(f"✅ Duración calculada: {duration} segundos")
+                        except Exception as e:
+                            print(f"Error calculando duración del audio: {e}")
+
+                    return output_path, video_title, thumbnail_url, channel_url, duration, category
+            except Exception as e:
+                print(f"Intento con formato '{fmt}' falló: {e}")
+                continue
+
+        # If all formats failed
+        print(f"Todos los formatos fallaron para la URL: {url}")
+        return None, None, None, None, 0, "transcripción"
+    
+    def split_audio_into_chunks(self, audio_path: str, chunk_length_ms: int = 10000) -> List[AudioSegment]:
+        """Divide el audio en chunks para mejor procesamiento"""
+        audio = AudioSegment.from_wav(audio_path)
+        chunks = split_on_silence(
+            audio,
+            min_silence_len=500,
+            silence_thresh=-40,
+            keep_silence=300
+        )
+        
+        # Si no hay chunks por silencio, dividir por tiempo
+        if len(chunks) <= 1:
+            chunks = []
+            for i in range(0, len(audio), chunk_length_ms):
+                chunk = audio[i:i + chunk_length_ms]
+                chunks.append(chunk)
+        
+        return chunks
+    
+    def transcribe_audio_chunk(self, audio_chunk: AudioSegment, start_time_ms: int) -> Dict[str, Any]:
+        """Transcribe un chunk de audio y retorna el texto con tiempo"""
+        # Guardar chunk temporalmente
+        temp_path = os.path.join(self.temp_dir, f"chunk_{start_time_ms}.wav")
+        audio_chunk.export(temp_path, format="wav")
+        
+        try:
+            with sr.AudioFile(temp_path) as source:
+                audio_data = self.recognizer.record(source)
+                text = self.recognizer.recognize_google(audio_data, language='it-IT')
+                
+                # Calcular tiempo de inicio y fin
+                start_time = start_time_ms / 1000.0
+                end_time = (start_time_ms + len(audio_chunk)) / 1000.0
+                
+                return {
+                    'text': text,
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'success': True
+                }
+        except sr.UnknownValueError:
+            return {
+                'text': '',
+                'start_time': start_time_ms / 1000.0,
+                'end_time': (start_time_ms + len(audio_chunk)) / 1000.0,
+                'success': False
+            }
+        except Exception as e:
+            print(f"Error transcribiendo chunk: {e}")
+            return {
+                'text': '',
+                'start_time': start_time_ms / 1000.0,
+                'end_time': (start_time_ms + len(audio_chunk)) / 1000.0,
+                'success': False
+            }
+        finally:
+            # Limpiar archivo temporal
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+    
+    def translate_text(self, text: str, target_lang: str) -> str:
+        """Traduce texto al idioma objetivo"""
+        if not text.strip():
+            return ""
+        
+        try:
+            # Mapear códigos de idioma para deep-translator
+            lang_map = {
+                'en': 'en',
+                'es': 'es', 
+                'pt': 'pt',
+                'it': 'it'
+            }
+            
+            target_lang_code = lang_map.get(target_lang, target_lang)
+            translator = GoogleTranslator(source='it', target=target_lang_code)
+            translation = translator.translate(text)
+            return translation
+        except Exception as e:
+            print(f"Error traduciendo a {target_lang}: {e}")
+            return text
+    
+    def format_duration(self, seconds: float) -> str:
+        """Convierte segundos a formato HH:MM:SS.mmm"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        milliseconds = int((seconds % 1) * 1000)
+        
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{milliseconds:03d}"
+    
+    def convert_audio_to_wav(self, audio_file_path: str) -> str:
+        """Convierte cualquier formato de audio a WAV"""
+        try:
+            # Si ya es WAV, no convertir
+            if audio_file_path.lower().endswith('.wav'):
+                return audio_file_path
+            
+            print(f"Convirtiendo {audio_file_path} a formato WAV...")
+            
+            # Cargar el archivo de audio
+            audio = AudioSegment.from_file(audio_file_path)
+            
+            # Crear archivo WAV temporal
+            wav_path = os.path.join(self.temp_dir, "converted_audio.wav")
+            
+            # Exportar como WAV
+            audio.export(wav_path, format="wav")
+            
+            print("✅ Conversión completada")
+            return wav_path
+            
+        except Exception as e:
+            print(f"Error convirtiendo audio: {e}")
+            return None
+    
+    def transcribe_audio_file(self, audio_file_path: str, output_json_path: str = "transcription.json", optimize_for_ui: bool = True) -> bool:
+        """Transcribe un archivo de audio local"""
+        print(f"Procesando archivo de audio: {audio_file_path}")
+        
+        if not os.path.exists(audio_file_path):
+            print(f"Error: El archivo {audio_file_path} no existe")
+            return False
+        
+        # Convertir a WAV si es necesario
+        audio_path = self.convert_audio_to_wav(audio_file_path)
+        
+        if not audio_path:
+            print("Error: No se pudo convertir el archivo de audio")
+            return False
+        
+        return self._process_audio(audio_path, output_json_path, "Archivo de audio local", author_url="", optimize_for_ui=optimize_for_ui)
+    
+    def transcribe_audio_from_url(self, audio_url: str, output_json_path: str = "transcription.json", optimize_for_ui: bool = True) -> bool:
+        """Transcribe un archivo de audio desde una URL (storage o web)"""
+        print(f"Procesando audio desde URL: {audio_url}")
+        
+        # Descargar el archivo de audio
+        audio_path = self.download_audio_from_url(audio_url)
+        
+        if not audio_path:
+            print("Error: No se pudo descargar el archivo de audio")
+            return False
+            
+        # Intentar extraer thumbnail si es un video
+        thumbnail_path = ""
+        lower_path = audio_path.lower()
+        if lower_path.endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm')):
+            print("Detectado archivo de video, intentando extraer thumbnail...")
+            thumbnail_path = self._extract_thumbnail(audio_path)
+            if thumbnail_path:
+                print(f"Thumbnail extraído: {thumbnail_path}")
+        
+        # Convertir a WAV si es necesario
+        wav_path = self.convert_audio_to_wav(audio_path)
+        
+        if not wav_path:
+            print("Error: No se pudo convertir el archivo de audio")
+            return False
+        
+        return self._process_audio(wav_path, output_json_path, f"Audio desde URL: {audio_url}", thumbnail_url=thumbnail_path, author_url="", optimize_for_ui=optimize_for_ui)
+
+    def _extract_thumbnail(self, video_path: str) -> str:
+        """Extrae un thumbnail del video usando ffmpeg"""
+        try:
+            # Crear nombre para el thumbnail
+            base_name = os.path.splitext(os.path.basename(video_path))[0]
+            thumbnail_path = os.path.join(self.temp_dir, f"{base_name}_thumb.jpg")
+            
+            # Comando ffmpeg para extraer un frame al segundo 1
+            cmd = [
+                'ffmpeg',
+                '-i', video_path,
+                '-ss', '00:00:01.000',
+                '-vframes', '1',
+                thumbnail_path,
+                '-y'  # Sobrescribir si existe
+            ]
+            
+            # Ejecutar comando
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            if os.path.exists(thumbnail_path):
+                return thumbnail_path
+            return ""
+            
+        except Exception as e:
+            print(f"Error extrayendo thumbnail: {e}")
+            return ""
+
+    def download_audio_from_url(self, url: str) -> str:
+        """Descarga un archivo de audio desde una URL"""
+        try:
+            import requests
+            from urllib.parse import urlparse, unquote
+            
+            print("Descargando archivo de audio...")
+            
+            # Convertir URL de storage a descarga directa
+            direct_url = self.get_direct_download_url(url)
+            if direct_url != url:
+                print(f"🔄 URL convertida: {direct_url}")
+            
+            # Crear nombre de archivo temporal
+            parsed_url = urlparse(direct_url)
+            path = unquote(parsed_url.path)
+            filename = os.path.basename(path)
+            
+            # Si el nombre no tiene extensión o es muy largo/raro, intentar sacarlo del content-type después
+            # Por ahora, si no tiene extensión, asumir mp3
+            if not filename or '.' not in filename:
+                filename = "downloaded_audio.mp3"
+            
+            # Ruta temporal para el archivo descargado
+            temp_audio_path = os.path.join(self.temp_dir, filename)
+            
+            # Headers para simular un navegador
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'audio/*, */*',
+                'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Referer': 'https://www.google.com/',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            }
+            
+            # Descargar el archivo
+            response = requests.get(direct_url, headers=headers, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            # Intear deducir extensión del content-type si el archivo no la tiene bien
+            content_type = response.headers.get('content-type', '').lower()
+            
+            # Si detectamos que es video y la extensión es incorrecta
+            if 'video/' in content_type and not filename.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm')):
+                 if not temp_audio_path.lower().endswith('.mp4'):
+                    temp_audio_path += ".mp4"
+            
+            if not any(t in content_type for t in ['audio/', 'video/', 'application/octet-stream', 'binary']):
+                print("⚠️  Advertencia: El archivo puede no ser multimedia")
+            
+            # Guardar el archivo
+            with open(temp_audio_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            print(f"✅ Archivo descargado: {os.path.basename(temp_audio_path)}")
+            return temp_audio_path
+            
+        except Exception as e:
+            print(f"Error descargando audio: {e}")
+            return None
+    
+    def get_direct_download_url(self, url: str) -> str:
+        """Convierte URLs de storage a URLs de descarga directa"""
+        try:
+            # Google Drive
+            if 'drive.google.com' in url:
+                return self._convert_google_drive_url(url)
+            
+            # Dropbox
+            elif 'dropbox.com' in url:
+                return self._convert_dropbox_url(url)
+            
+            # OneDrive
+            elif '1drv.ms' in url or 'onedrive.live.com' in url:
+                return self._convert_onedrive_url(url)
+            
+            # Box
+            elif 'box.com' in url:
+                return self._convert_box_url(url)
+            
+            # URL directa (no necesita conversión)
+            else:
+                return url
+                
+        except Exception as e:
+            print(f"Error convirtiendo URL: {e}")
+            return url
+    
+    def _convert_google_drive_url(self, url: str) -> str:
+        """Convierte URL de Google Drive a descarga directa"""
+        try:
+            # Extraer ID del archivo
+            if '/file/d/' in url:
+                file_id = url.split('/file/d/')[1].split('/')[0]
+            elif 'id=' in url:
+                file_id = url.split('id=')[1].split('&')[0]
+            else:
+                return url
+            
+            # Crear URL de descarga directa
+            direct_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            print(f"🔄 URL de Google Drive convertida a descarga directa")
+            return direct_url
+            
+        except Exception as e:
+            print(f"Error convirtiendo URL de Google Drive: {e}")
+            return url
+    
+    def _convert_dropbox_url(self, url: str) -> str:
+        """Convierte URL de Dropbox a descarga directa"""
+        try:
+            # Convertir URL de Dropbox a descarga directa
+            if '?dl=0' in url:
+                direct_url = url.replace('?dl=0', '?dl=1')
+            elif '?dl=' not in url:
+                direct_url = url + '?dl=1'
+            else:
+                direct_url = url
+            
+            print(f"🔄 URL de Dropbox convertida a descarga directa")
+            return direct_url
+            
+        except Exception as e:
+            print(f"Error convirtiendo URL de Dropbox: {e}")
+            return url
+    
+    def _convert_onedrive_url(self, url: str) -> str:
+        """Convierte URL de OneDrive a descarga directa"""
+        try:
+            # OneDrive URLs son más complejas, intentar conversión básica
+            if '1drv.ms' in url:
+                # Redirigir a la URL completa
+                import requests
+                response = requests.head(url, allow_redirects=True)
+                url = response.url
+            
+            # Agregar parámetro de descarga
+            if 'download=1' not in url:
+                separator = '&' if '?' in url else '?'
+                direct_url = url + f"{separator}download=1"
+            else:
+                direct_url = url
+            
+            print(f"🔄 URL de OneDrive convertida a descarga directa")
+            return direct_url
+            
+        except Exception as e:
+            print(f"Error convirtiendo URL de OneDrive: {e}")
+            return url
+    
+    def _convert_box_url(self, url: str) -> str:
+        """Convierte URL de Box a descarga directa"""
+        try:
+            # Box URLs con parámetro de descarga
+            if 'download=1' not in url:
+                separator = '&' if '?' in url else '?'
+                direct_url = url + f"{separator}download=1"
+            else:
+                direct_url = url
+            
+            print(f"🔄 URL de Box convertida a descarga directa")
+            return direct_url
+            
+        except Exception as e:
+            print(f"Error convirtiendo URL de Box: {e}")
+            return url
+    
+    def format_video_duration(self, seconds: float) -> str:
+        """Convierte segundos a formato para UI (ej: 0:26, 1:05, 12:30)"""
+        if not seconds:
+            return ""
+        
+        seconds = int(round(seconds))
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+        
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        else:
+            return f"{minutes}:{secs:02d}"
+
+    def transcribe_video(self, video_url: str, output_json_path: str = "transcription.json", optimize_for_ui: bool = True) -> bool:
+        """Proceso completo de transcripción y traducción de video de YouTube"""
+        print("Descargando video de YouTube...")
+        result = self.download_youtube_video(video_url)
+        
+        if result[0] is None:
+            print("Error: No se pudo descargar el video")
+            return False
+        
+        audio_path, video_title, thumbnail_url, author_url, duration_seconds, category_from_yt = result
+        
+        # Convert duration to string format for UI (e.g. 0:26)
+        duration_str = self.format_video_duration(duration_seconds)
+        
+        return self._process_audio(audio_path, output_json_path, video_url, video_title, thumbnail_url, author_url, optimize_for_ui, duration=duration_str, category=category_from_yt)
+    
+    def _process_audio(self, audio_path: str, output_json_path: str, source_url: str, video_title: str = None, thumbnail_url: str = None, author_url: str = "", optimize_for_ui: bool = True, duration: str = "", category: str = "transcripción") -> bool:
+        """Procesa el audio (común para video y archivos locales) usando Whisper"""
+        
+        try:
+            print("Iniciando transcripción con Whisper (esto puede tardar unos minutos)...")
+            # Transcribir directamente con Whisper
+            # Whisper se encarga de dividir el audio y manejar tiempos internamente
+            result = self.model.transcribe(audio_path, language="it")
+            
+            segments = result.get('segments', [])
+            print(f"Whisper generó {len(segments)} segmentos base.")
+            
+            transcriptions = []
+            
+            print("Traduciendo segmentos...")
+            for i, segment in enumerate(segments):
+                # if i % 10 == 0:
+                #    print(f"Procesando segmento {i+1}/{len(segments)}")
+                
+                segment_text = segment['text'].strip()
+                if not segment_text:
+                    continue
+                    
+                start_time = segment['start']
+                end_time = segment['end']
+                
+                # Traducir texto
+                translation_en = self.translate_text(segment_text, 'en')
+                translation_pt = self.translate_text(segment_text, 'pt')
+                translation_es = self.translate_text(segment_text, 'es')
+                
+                transcription_data = {
+                    'text': segment_text,
+                    'startTime': self.format_duration(start_time),
+                    'endTime': self.format_duration(end_time),
+                    'translation': translation_es,      # Traducción del texto de este segmento
+                    'translationPR': translation_pt,   # Traducción del texto de este segmento
+                    'translationEN': translation_en,   # Traducción del texto de este segmento
+                    'isWordKey': False
+                }
+                
+                transcriptions.append(transcription_data)
+            
+            # Optimizar subtítulos para mejor legibilidad en la UI
+            if optimize_for_ui:
+                print("🔧 Optimizando subtítulos para mejor legibilidad...")
+                transcriptions = self._optimize_subtitles_for_ui(transcriptions, max_chars=80)
+                print(f"✅ Subtítulos optimizados: {len(transcriptions)} segmentos")
+            
+            # Determinar el autor
+            author_field = "DanteStudio"
+            if author_url:
+                author_field = author_url
+            
+            # Crear estructura final del JSON con metadatos correctos
+            final_data = {
+                'url': source_url,                                    # URL real del video
+                'name': video_title if video_title else "Video de YouTube",  # Nombre real del video
+                'description': "Transcripción automática del audio",
+                'category': category,
+                'image': thumbnail_url if thumbnail_url else "",       # Thumbnail del video
+                'author': author_field,
+                'chiave': "transcripción",
+                'livello': "intermedio",
+                'lingua': "it",
+                'views': 0,
+                'duration': duration,                                  # Duración del video
+                'chiaveTranslation': "transcripción",
+                'chiaveTranslationEN': "transcription",
+                'chiaveTranslationPR': "transcrição",
+                'subtitles': transcriptions
+            }
+            
+            # Guardar en archivo JSON
+            try:
+                with open(output_json_path, 'w', encoding='utf-8') as f:
+                    json.dump(final_data, f, ensure_ascii=False, indent=2)
+                
+                print(f"Transcripción completada y guardada en {output_json_path}")
+                print(f"Total de segmentos transcritos: {len(transcriptions)}")
+                return True
+                
+            except Exception as e:
+                print(f"Error guardando archivo JSON: {e}")
+                return False
+            
+        except Exception as e:
+            print(f"Error durante el procesamiento con Whisper: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        
+        finally:
+            # Limpiar archivos temporales
+            if os.path.join(self.temp_dir) in audio_path: # Solo borrar si está en temp
+                try:
+                    if os.path.exists(audio_path):
+                        os.remove(audio_path)
+                except:
+                    pass
+
+    def cleanup(self):
+        """Limpia archivos temporales"""
+        import shutil
+        if os.path.exists(self.temp_dir):
+            try:
+                shutil.rmtree(self.temp_dir)
+            except:
+                pass

@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: dantestudio-python-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements_api.txt
+    startCommand: uvicorn api_transcriber:app --host 0.0.0.0 --port 8000
+    envVars:
+      - key: GO_API_URL
+        value: https://dantexxi-api.onrender.com
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: PORT
+        value: 8000
+    healthCheckPath: /health
+    autoDeploy: true

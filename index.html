@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DanteStudio - Transcriptor de Videos</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f5f5;
+            color: #333;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            background-color: white;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 500px;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 1.5rem;
+        }
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: bold;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 0.75rem;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        button:disabled {
+            background-color: #95a5a6;
+            cursor: not-allowed;
+        }
+        #result {
+            margin-top: 1.5rem;
+            padding: 1rem;
+            border-radius: 5px;
+            display: none;
+        }
+        .success {
+            background-color: #dff0d8;
+            color: #3c763d;
+            border: 1px solid #d6e9c6;
+        }
+        .error {
+            background-color: #f2dede;
+            color: #a94442;
+            border: 1px solid #ebccd1;
+        }
+        .loading {
+            text-align: center;
+            margin-top: 1rem;
+            display: none;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 2s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .status-box {
+            margin-top: 1rem;
+            font-size: 0.9em;
+            color: #666;
+            border-top: 1px solid #eee;
+            padding-top: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>DanteStudio Transcriptor</h1>
+        <div class="form-group">
+            <label for="videoUrl">URL de YouTube:</label>
+            <input type="text" id="videoUrl" placeholder="https://www.youtube.com/watch?v=..." required>
+        </div>
+        <button id="transcribeBtn">Transcribir Video</button>
+        
+        <div id="loading" class="loading">
+            <div class="spinner"></div>
+            <p>Iniciando transcripción...</p>
+        </div>
+
+        <div id="result"></div>
+        
+        <div id="statusContainer" class="status-box" style="display:none;">
+            <strong>Estado:</strong> <span id="statusText">Esperando...</span>
+            <br>
+            <strong>Progreso:</strong> <span id="progressText">0%</span>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('transcribeBtn').addEventListener('click', async () => {
+            const url = document.getElementById('videoUrl').value.trim();
+            const btn = document.getElementById('transcribeBtn');
+            const resultDiv = document.getElementById('result');
+            const loadingDiv = document.getElementById('loading');
+            const statusContainer = document.getElementById('statusContainer');
+            const statusText = document.getElementById('statusText');
+            const progressText = document.getElementById('progressText');
+
+            if (!url) {
+                alert('Por favor ingresa una URL válida');
+                return;
+            }
+
+            // Reset UI
+            btn.disabled = true;
+            resultDiv.style.display = 'none';
+            resultDiv.className = '';
+            loadingDiv.style.display = 'block';
+            statusContainer.style.display = 'none';
+
+            try {
+                // 1. Iniciar transcripción
+                const response = await fetch('/transcribe', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        url: url,
+                        type: 'youtube',
+                        language: 'it',
+                        save_to_db: true
+                    })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.message || 'Error al iniciar transcripción');
+                }
+
+                const taskId = data.id;
+                loadingDiv.style.display = 'none';
+                statusContainer.style.display = 'block';
+                statusText.textContent = 'En proceso...';
+
+                // 2. Polling de estado
+                const pollInterval = setInterval(async () => {
+                    try {
+                        const statusRes = await fetch(`/status/${taskId}`);
+                        const statusData = await statusRes.json();
+
+                        statusText.textContent = statusData.status;
+                        progressText.textContent = statusData.progress + '%';
+
+                        if (statusData.status === 'completed') {
+                            clearInterval(pollInterval);
+                            btn.disabled = false;
+                            resultDiv.textContent = 'Transcripción completada y enviada a la base de datos!';
+                            resultDiv.className = 'success';
+                            resultDiv.style.display = 'block';
+                            if (statusData.result && statusData.result.go_reel_id) {
+                                resultDiv.innerHTML += `<br><strong>ID del Reel:</strong> ${statusData.result.go_reel_id}`;
+                            }
+                        } else if (statusData.status === 'error') {
+                            clearInterval(pollInterval);
+                            btn.disabled = false;
+                            resultDiv.textContent = 'Error: ' + statusData.error;
+                            resultDiv.className = 'error';
+                            resultDiv.style.display = 'block';
+                        }
+                    } catch (e) {
+                        console.error("Error polling status:", e);
+                    }
+                }, 2000); // Check every 2 seconds
+
+            } catch (error) {
+                loadingDiv.style.display = 'none';
+                btn.disabled = false;
+                resultDiv.textContent = error.message;
+                resultDiv.className = 'error';
+                resultDiv.style.display = 'block';
+            }
+        });
+    </script>
+</body>
+</html>
