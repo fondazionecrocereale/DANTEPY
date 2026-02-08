@@ -40,6 +40,10 @@ class TranscriptionRequest(BaseModel):
     language: str = "it"
     save_to_db: bool = True
 
+class CreateReelRequest(BaseModel):
+    url: str
+    language: str = "it"
+
 class TranscriptionResponse(BaseModel):
     id: str
     status: str
@@ -73,13 +77,51 @@ async def start_transcription(request: TranscriptionRequest, background_tasks: B
         "error": None
     }
     
-    # Iniciar transcripción en background
+
+
+    # Si es video de youtube y se debe guardar en db, usar el nuevo flujo
+    if request.type == "youtube" and request.save_to_db:
+         # Crear request para el nuevo flujo
+         reel_request = CreateReelRequest(url=request.url, language=request.language)
+         # Iniciar creación de reel en background
+         background_tasks.add_task(process_reel_creation, task_id, reel_request)
+         
+         return TranscriptionResponse(
+            id=task_id,
+            status="pending",
+            message="Creación de Reel iniciada (Descarga -> Subida -> Transcripción)"
+        )
+    
+    # Flujo antiguo (solo transcripción o audio)
     background_tasks.add_task(process_transcription, task_id, request)
     
     return TranscriptionResponse(
         id=task_id,
         status="pending",
         message="Transcripción iniciada"
+    )
+
+@app.post("/create-reel", response_model=TranscriptionResponse)
+async def create_reel(request: CreateReelRequest, background_tasks: BackgroundTasks):
+    # Generar ID único
+    task_id = str(uuid.uuid4())
+    
+    # Crear entrada inicial
+    transcriptions[task_id] = {
+        "id": task_id,
+        "status": "pending",
+        "progress": 0,
+        "result": None,
+        "error": None
+    }
+    
+    # Iniciar creación de reel en background
+    background_tasks.add_task(process_reel_creation, task_id, request)
+    
+    return TranscriptionResponse(
+        id=task_id,
+        status="pending",
+        message="Creación de Reel iniciada (Descarga -> Subida -> Transcripción)"
     )
 
 @app.get("/status/{task_id}", response_model=TranscriptionStatus)
@@ -142,6 +184,105 @@ async def process_transcription(task_id: str, request: TranscriptionRequest):
         transcriptions[task_id]["error"] = str(e)
         print(f"Error en transcripción {task_id}: {e}")
 
+async def process_reel_creation(task_id: str, request: CreateReelRequest):
+    try:
+        # 1. Iniciar Descarga
+        transcriptions[task_id]["status"] = "processing_download"
+        transcriptions[task_id]["progress"] = 5
+        print(f"[{task_id}] Iniciando descarga de video...")
+        
+        loop = asyncio.get_running_loop()
+        
+        # Ejecutar descarga en thread pool
+        filepath, info = await loop.run_in_executor(
+            None, 
+            lambda: transcriber.download_video_file(request.url)
+        )
+        
+        if not filepath or not os.path.exists(filepath):
+            raise Exception("Fallo en la descarga del video")
+
+        print(f"[{task_id}] Video descargado: {filepath}")
+        transcriptions[task_id]["progress"] = 30
+        transcriptions[task_id]["status"] = "processing_upload"
+        
+        # 2. Subir al Backend (Supabase/Storage)
+        print(f"[{task_id}] Subiendo video al backend...")
+        upload_url = f"{GO_API_URL}/v1/upload?bucket=videos"
+        
+        public_url = await loop.run_in_executor(
+            None,
+            lambda: transcriber.upload_file_to_backend(filepath, upload_url)
+        )
+        
+        if not public_url:
+            raise Exception("Fallo en la subida del video")
+            
+        print(f"[{task_id}] Video subido. URL pública: {public_url}")
+        transcriptions[task_id]["progress"] = 50
+        transcriptions[task_id]["status"] = "processing_transcription"
+        
+        # 3. Transcribir el archivo local
+        print(f"[{task_id}] Iniciando transcripción...")
+        output_file = f"transcription_{task_id}.json"
+        
+        # Usamos transcribe_audio_file pasando la ruta local
+        success = await loop.run_in_executor(
+            None, 
+            lambda: transcriber.transcribe_audio_file(filepath, output_file, optimize_for_ui=True)
+        )
+        
+        if not success:
+            raise Exception("La transcripción no se pudo completar")
+            
+        transcriptions[task_id]["progress"] = 80
+        
+        # Leer el resultado
+        result_data = {}
+        if os.path.exists(output_file):
+            with open(output_file, 'r', encoding='utf-8') as f:
+                result_data = json.load(f)
+            # Limpiar archivo JSON temporal
+            os.remove(output_file)
+        else:
+             raise Exception("No se generó el archivo de salida de transcripción")
+
+        # 4. Actualizar metadatos del JSON con la info real del video y la URL pública
+        result_data['url'] = public_url
+        result_data['source_url'] = request.url # Keep original for reference if needed
+        result_data['name'] = info.get('title', result_data.get('name', 'Video sin título'))
+        result_data['image'] = info.get('thumbnail', result_data.get('image', ''))
+        
+        # Normalizar duración (yt-dlp devuelve segundos int/float, el json espera string formateado a veces, pero nuestro modelo backend acepta string)
+        duration_seconds = info.get('duration', 0)
+        result_data['duration'] = str(duration_seconds) 
+        
+        # Autor
+        result_data['author'] = info.get('uploader', result_data.get('author', 'Unknown Author'))
+        
+        transcriptions[task_id]["result"] = result_data
+        
+        # 5. Enviar a Backend (Crear Reel)
+        print(f"[{task_id}] Enviando Reel a API Go...")
+        await send_to_go_api(result_data, task_id)
+        
+        transcriptions[task_id]["status"] = "completed"
+        transcriptions[task_id]["progress"] = 100
+        print(f"[{task_id}] Proceso completado exitosamente")
+
+        # Limpiar archivo de video descargado
+        if os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+                print(f"[{task_id}] Archivo temporal eliminado: {filepath}")
+            except Exception as e:
+                print(f"No se pudo eliminar el archivo temporal: {e}")
+
+    except Exception as e:
+        transcriptions[task_id]["status"] = "error"
+        transcriptions[task_id]["error"] = str(e)
+        print(f"Error en creación de reel {task_id}: {e}")
+
 async def send_to_go_api(transcription_data: Dict[str, Any], task_id: str):
     """Envía los datos de transcripción a la API de Go"""
     try:
@@ -158,7 +299,7 @@ async def send_to_go_api(transcription_data: Dict[str, Any], task_id: str):
             "lingua": transcription_data.get("lingua", "it"),
             "livello": transcription_data.get("livello", "A1"),
             "name": transcription_data.get("name", "Video Transcrito"),
-            "url": transcription_data.get("source_url", "") or transcription_data.get("url", ""),
+            "url": transcription_data.get("url", ""), # This should now be the public_url
             "views": transcription_data.get("views", 0),
             "subtitles": transcription_data.get("subtitles", []),
             "duration": transcription_data.get("duration", ""),

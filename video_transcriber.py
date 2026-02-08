@@ -11,6 +11,7 @@ import tempfile
 from typing import List, Dict, Any
 import time
 import subprocess
+import requests
 
 import whisper
 
@@ -474,7 +475,6 @@ class VideoTranscriber:
     def download_audio_from_url(self, url: str) -> str:
         """Descarga un archivo de audio desde una URL"""
         try:
-            import requests
             from urllib.parse import urlparse, unquote
             
             print("Descargando archivo de audio...")
@@ -782,3 +782,47 @@ class VideoTranscriber:
                 shutil.rmtree(self.temp_dir)
             except:
                 pass
+
+    def download_video_file(self, youtube_url: str, output_path: str = None) -> tuple:
+        """
+        Downloads video from YouTube and returns the filepath and metadata.
+        """
+        if output_path is None:
+             output_path = os.path.join(self.temp_dir, "%(id)s.%(ext)s")
+
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'outtmpl': output_path,
+            'quiet': True,
+            'no_warnings': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            print(f"Descargando video de: {youtube_url}")
+            info = ydl.extract_info(youtube_url, download=True)
+            filename = ydl.prepare_filename(info)
+            print(f"Video descargado en: {filename}")
+            return filename, info
+
+    def upload_file_to_backend(self, filepath: str, upload_endpoint: str) -> str:
+        """
+        Uploads the file to the backend and returns the public URL.
+        """
+        print(f"Subiendo {filepath} a {upload_endpoint}...")
+        try:
+            with open(filepath, 'rb') as f:
+                # Add explict MIME type
+                files = {'file': (os.path.basename(filepath), f, 'video/mp4')}
+                # You can specify a bucket via query param: ?bucket=reels if not in endpoint
+                response = requests.post(upload_endpoint, files=files)
+            
+            if response.status_code == 200:
+                data = response.json()
+                public_url = data.get('url')
+                print(f"Subida exitosa: {public_url}")
+                return public_url
+            else:
+                raise Exception(f"Upload failed: {response.text}")
+        except Exception as e:
+            print(f"Error subiendo archivo: {e}")
+            raise e
+
