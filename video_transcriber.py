@@ -282,65 +282,9 @@ class VideoTranscriber:
         print(f"Todos los formatos fallaron para la URL: {url}")
         return None, None, None, None, 0, "transcripción"
     
-    def split_audio_into_chunks(self, audio_path: str, chunk_length_ms: int = 10000) -> List[AudioSegment]:
-        """Divide el audio en chunks para mejor procesamiento"""
-        audio = AudioSegment.from_wav(audio_path)
-        chunks = split_on_silence(
-            audio,
-            min_silence_len=500,
-            silence_thresh=-40,
-            keep_silence=300
-        )
-        
-        # Si no hay chunks por silencio, dividir por tiempo
-        if len(chunks) <= 1:
-            chunks = []
-            for i in range(0, len(audio), chunk_length_ms):
-                chunk = audio[i:i + chunk_length_ms]
-                chunks.append(chunk)
-        
-        return chunks
+    # Methods split_audio_into_chunks and transcribe_audio_chunk removed (legacy code)
     
-    def transcribe_audio_chunk(self, audio_chunk: AudioSegment, start_time_ms: int) -> Dict[str, Any]:
-        """Transcribe un chunk de audio y retorna el texto con tiempo"""
-        # Guardar chunk temporalmente
-        temp_path = os.path.join(self.temp_dir, f"chunk_{start_time_ms}.wav")
-        audio_chunk.export(temp_path, format="wav")
-        
-        try:
-            with sr.AudioFile(temp_path) as source:
-                audio_data = self.recognizer.record(source)
-                text = self.recognizer.recognize_google(audio_data, language='it-IT')
-                
-                # Calcular tiempo de inicio y fin
-                start_time = start_time_ms / 1000.0
-                end_time = (start_time_ms + len(audio_chunk)) / 1000.0
-                
-                return {
-                    'text': text,
-                    'start_time': start_time,
-                    'end_time': end_time,
-                    'success': True
-                }
-        except sr.UnknownValueError:
-            return {
-                'text': '',
-                'start_time': start_time_ms / 1000.0,
-                'end_time': (start_time_ms + len(audio_chunk)) / 1000.0,
-                'success': False
-            }
-        except Exception as e:
-            print(f"Error transcribiendo chunk: {e}")
-            return {
-                'text': '',
-                'start_time': start_time_ms / 1000.0,
-                'end_time': (start_time_ms + len(audio_chunk)) / 1000.0,
-                'success': False
-            }
-        finally:
-            # Limpiar archivo temporal
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+
     
     def translate_text(self, text: str, target_lang: str) -> str:
         """Traduce texto al idioma objetivo"""
@@ -645,7 +589,7 @@ class VideoTranscriber:
     def format_video_duration(self, seconds: float) -> str:
         """Convierte segundos a formato para UI (ej: 0:26, 1:05, 12:30)"""
         if not seconds:
-            return ""
+            return "0:00"
         
         seconds = int(round(seconds))
         hours = seconds // 3600
