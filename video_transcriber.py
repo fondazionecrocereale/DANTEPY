@@ -18,7 +18,7 @@ import whisper
 class VideoTranscriber:
     def __init__(self):
         print("Cargando modelo Whisper (esto puede tardar un poco la primera vez)...")
-        self.model = whisper.load_model("small")
+        self.model = whisper.load_model("tiny")
         self.temp_dir = tempfile.mkdtemp()
         
     def _split_long_segment(self, segment, max_chars=80):
