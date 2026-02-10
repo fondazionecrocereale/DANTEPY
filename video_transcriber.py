@@ -295,10 +295,11 @@ class VideoTranscriber:
                 'age_limit': None,
                 'geo_bypass': True,
                 'geo_bypass_country': 'US',
+                'source_address': '0.0.0.0', # Force IPv4 to avoid IPv6 blocks
                 # Additional options for problematic videos
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['android', 'ios'],
+                        'player_client': ['ios', 'android', 'web'],
                     }
                 },
                 'logger': YtDlpLogger(status_callback)
