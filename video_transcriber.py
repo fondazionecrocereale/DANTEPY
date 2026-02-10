@@ -70,7 +70,9 @@ class VideoTranscriber:
                 with os.fdopen(fd, 'w') as tmp:
                     tmp.write(cookies_content)
                 self.cookie_temp_file = path
-                print("✅ Usando cookies desde variable de entorno")
+                print(f"✅ Usando cookies desde variable de entorno. Longitud: {len(cookies_content)}")
+                print(f"📄 Inicio del contenido de cookies: {cookies_content[:50]}...")
+                print(f"📂 Archivo temporal de cookies creado en: {path}")
                 return path
             except Exception as e:
                 print(f"Error creando archivo de cookies temporal: {e}")
