@@ -291,13 +291,6 @@ class VideoTranscriber:
                 'verbose': False,
                 'extract_flat': False,
                 'skip_download': False,
-                # Headers para simular un navegador real
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-us,en;q=0.5',
-                    'Sec-Fetch-Mode': 'navigate',
-                },
                 # Opciones adicionales para YouTube
                 'age_limit': None,
                 'geo_bypass': True,
@@ -305,8 +298,7 @@ class VideoTranscriber:
                 # Additional options for problematic videos
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['android', 'web'],
-                        'player_skip': ['js', 'configs'],
+                        'player_client': ['android', 'ios'],
                     }
                 },
                 'logger': YtDlpLogger(status_callback)
