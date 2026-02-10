@@ -15,6 +15,33 @@ import requests
 
 import whisper
 
+class YtDlpLogger:
+    def __init__(self, callback=None):
+        self.callback = callback
+
+    def debug(self, msg):
+        # Para debug, podríamos imprimir o ignorar
+        if msg.strip().startswith('[debug] '):
+            pass
+        else:
+            self.check_auth(msg)
+
+    def info(self, msg):
+        self.check_auth(msg)
+        print(msg)
+
+    def warning(self, msg):
+        self.check_auth(msg)
+        print(msg)
+
+    def error(self, msg):
+        print(msg)
+
+    def check_auth(self, msg):
+        if self.callback and ("google.com/device" in msg or "d.youtube.com" in msg or "authorize" in msg.lower()):
+            self.callback(msg)
+
+
 class VideoTranscriber:
     def __init__(self):
         self.model = None
@@ -233,7 +260,7 @@ class VideoTranscriber:
         
         return optimized_subtitles
 
-    def download_youtube_video(self, url: str, output_path: str = None) -> tuple:
+    def download_youtube_video(self, url: str, output_path: str = None, status_callback=None) -> tuple:
         """Descarga un video de YouTube y extrae el audio, retorna también metadatos"""
         if output_path is None:
             output_path = os.path.join(self.temp_dir, "audio.wav")
@@ -279,13 +306,19 @@ class VideoTranscriber:
                         'player_client': ['android', 'web'],
                         'player_skip': ['js', 'configs'],
                     }
-                }
+                },
+                'logger': YtDlpLogger(status_callback)
             }
 
-            # Configurar cookies si existen
+            # Configurar cookies si existen, sino usar OAuth2 para evitar bloqueo de bot
             cookie_file = self._get_cookiefile()
             if cookie_file:
                 ydl_opts['cookiefile'] = cookie_file
+            else:
+                print("ℹ️ No se encontraron cookies locales. Activando autenticación OAuth2.")
+                print("⚠️ ATENCIÓN: Si es la primera vez, busca en la consola el CÓDIGO y URL (google.com/device) para autorizar.")
+                ydl_opts['username'] = 'oauth2'
+                ydl_opts['password'] = ''
 
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -643,10 +676,10 @@ class VideoTranscriber:
         else:
             return f"{minutes}:{secs:02d}"
 
-    def transcribe_video(self, video_url: str, output_json_path: str = "transcription.json", optimize_for_ui: bool = True) -> bool:
+    def transcribe_video(self, video_url: str, output_json_path: str = "transcription.json", optimize_for_ui: bool = True, status_callback=None) -> bool:
         """Proceso completo de transcripción y traducción de video de YouTube"""
         print("Descargando video de YouTube...")
-        result = self.download_youtube_video(video_url)
+        result = self.download_youtube_video(video_url, status_callback=status_callback)
         
         if result[0] is None:
             print("Error: No se pudo descargar el video")
@@ -777,7 +810,7 @@ class VideoTranscriber:
             except:
                 pass
 
-    def download_video_file(self, youtube_url: str, output_path: str = None) -> tuple:
+    def download_video_file(self, youtube_url: str, output_path: str = None, status_callback=None) -> tuple:
         """
         Downloads video from YouTube and returns the filepath and metadata.
         """
@@ -795,6 +828,13 @@ class VideoTranscriber:
         cookie_file = self._get_cookiefile()
         if cookie_file:
             ydl_opts['cookiefile'] = cookie_file
+        else:
+            print("ℹ️ No se encontraron cookies locales. Activando autenticación OAuth2.")
+            print("⚠️ ATENCIÓN: Si es la primera vez, busca en la consola el CÓDIGO y URL (google.com/device) para autorizar.")
+            ydl_opts['username'] = 'oauth2'
+            ydl_opts['password'] = ''
+        
+        ydl_opts['logger'] = YtDlpLogger(status_callback)
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             print(f"Descargando video de: {youtube_url}")

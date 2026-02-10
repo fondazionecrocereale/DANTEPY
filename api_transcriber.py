@@ -140,12 +140,17 @@ async def process_transcription(task_id: str, request: TranscriptionRequest):
         # Nombre de archivo temporal para el JSON
         output_file = f"transcription_{task_id}.json"
         
+        # Callback para actualizar el estado con mensajes de autenticación
+        def status_update(msg):
+            transcriptions[task_id]["message"] = f"⚠️ AUTH REQUERIDA: {msg}"
+            print(f"[{task_id}] Status UPDATE: {msg}")
+
         # Ejecutar transcripción (que es bloqueante) en un thread pool
         # para no bloquear el loop de eventos principal
         loop = asyncio.get_running_loop()
         success = await loop.run_in_executor(
             None, 
-            lambda: transcriber.transcribe_video(request.url, output_file, optimize_for_ui=True)
+            lambda: transcriber.transcribe_video(request.url, output_file, optimize_for_ui=True, status_callback=status_update)
         )
         
         if not success:
@@ -193,10 +198,19 @@ async def process_reel_creation(task_id: str, request: CreateReelRequest):
         
         loop = asyncio.get_running_loop()
         
+        # Callback para actualizar el estado con mensajes de autenticación (ej: código de Google)
+        def status_update(msg):
+            # Limpiamos un poco el mensaje si es muy largo, nos interesa el código y URL
+            clean_msg = msg.replace('[youtube] ', '').strip()
+            transcriptions[task_id]["message"] = f"⚠️ {clean_msg}"
+            # Opcional: poner en estado especial
+            # transcriptions[task_id]["status"] = "waiting_auth" 
+            print(f"[{task_id}] Mensaje importante: {clean_msg}")
+
         # Ejecutar descarga en thread pool
         filepath, info = await loop.run_in_executor(
             None, 
-            lambda: transcriber.download_video_file(request.url)
+            lambda: transcriber.download_video_file(request.url, status_callback=status_update)
         )
         
         if not filepath or not os.path.exists(filepath):
