@@ -38,8 +38,8 @@ class YtDlpLogger:
         print(msg)
 
     def check_auth(self, msg):
-        if self.callback and ("google.com/device" in msg or "d.youtube.com" in msg or "authorize" in msg.lower()):
-            self.callback(msg)
+        if self.callback and ("confirm you’re not a bot" in msg or "Sign in" in msg):
+            self.callback(f"⚠️ YouTube requiere autenticación (Bot detection): {msg}")
 
 
 class VideoTranscriber:
@@ -291,7 +291,7 @@ class VideoTranscriber:
                 'skip_download': False,
                 # Headers para simular un navegador real
                 'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                     'Accept-Language': 'en-us,en;q=0.5',
                     'Sec-Fetch-Mode': 'navigate',
@@ -310,15 +310,14 @@ class VideoTranscriber:
                 'logger': YtDlpLogger(status_callback)
             }
 
-            # Configurar cookies si existen, sino usar OAuth2 para evitar bloqueo de bot
+            # Configurar cookies si existen. 
+            # OAuth2 ya no es soportado por youtube/yt-dlp, así que si no hay cookies dependemos de la suerte/IP limpia.
             cookie_file = self._get_cookiefile()
             if cookie_file:
                 ydl_opts['cookiefile'] = cookie_file
             else:
-                print("ℹ️ No se encontraron cookies locales. Activando autenticación OAuth2.")
-                print("⚠️ ATENCIÓN: Si es la primera vez, busca en la consola el CÓDIGO y URL (google.com/device) para autorizar.")
-                ydl_opts['username'] = 'oauth2'
-                ydl_opts['password'] = ''
+                print("ℹ️ No se encontraron cookies locales. Intentando descarga directa sin autenticación.")
+                print("⚠️ ATENCIÓN: Si falla con 'Sign in to confirm you’re not a bot', necesitas configurar YOUTUBE_COOKIES.")
 
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
