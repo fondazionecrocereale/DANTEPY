@@ -3,7 +3,7 @@ uvicorn[standard]>=0.27.0
 httpx>=0.28.1
 pydantic>=2.6.0
 python-multipart>=0.0.6
-yt-dlp>=2023.11.16
+yt-dlp>=2025.1.26
 
 deep-translator>=1.11.4
 pydub>=0.25.1

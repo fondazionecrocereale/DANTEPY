@@ -19,7 +19,38 @@ class VideoTranscriber:
     def __init__(self):
         self.model = None
         self.temp_dir = tempfile.mkdtemp()
+        self.cookie_temp_file = None
+
+    def _get_cookiefile(self):
+        """
+        Obtiene el archivo de cookies.
+        Prioridad:
+        1. Archivo 'cookies.txt' en el directorio actual.
+        2. Contenido en variable de entorno 'YOUTUBE_COOKIES'.
+        """
+        # 1. Buscar cookies.txt en directorio local
+        local_cookies = os.path.join(os.getcwd(), 'cookies.txt')
+        if os.path.exists(local_cookies):
+            print(f"✅ Usando cookies locales: {local_cookies}")
+            return local_cookies
         
+        # 2. Buscar en variable de entorno
+        cookies_content = os.environ.get('YOUTUBE_COOKIES')
+        if cookies_content:
+            try:
+                # Crear archivo temporal
+                fd, path = tempfile.mkstemp(suffix='.txt', text=True)
+                with os.fdopen(fd, 'w') as tmp:
+                    tmp.write(cookies_content)
+                self.cookie_temp_file = path
+                print("✅ Usando cookies desde variable de entorno")
+                return path
+            except Exception as e:
+                print(f"Error creando archivo de cookies temporal: {e}")
+        
+        print("⚠️ No se encontraron cookies (cookies.txt o YOUTUBE_COOKIES). La descarga podría fallar por bot detection.")
+        return None
+
     def _get_model(self):
         """Carga el modelo Whisper bajo demanda si no está cargado"""
         if self.model is None:
@@ -250,6 +281,11 @@ class VideoTranscriber:
                     }
                 }
             }
+
+            # Configurar cookies si existen
+            cookie_file = self._get_cookiefile()
+            if cookie_file:
+                ydl_opts['cookiefile'] = cookie_file
 
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -734,6 +770,12 @@ class VideoTranscriber:
                 shutil.rmtree(self.temp_dir)
             except:
                 pass
+        
+        if self.cookie_temp_file and os.path.exists(self.cookie_temp_file):
+            try:
+                os.remove(self.cookie_temp_file)
+            except:
+                pass
 
     def download_video_file(self, youtube_url: str, output_path: str = None) -> tuple:
         """
@@ -748,6 +790,12 @@ class VideoTranscriber:
             'quiet': True,
             'no_warnings': True,
         }
+        
+        # Configurar cookies si existen
+        cookie_file = self._get_cookiefile()
+        if cookie_file:
+            ydl_opts['cookiefile'] = cookie_file
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             print(f"Descargando video de: {youtube_url}")
             info = ydl.extract_info(youtube_url, download=True)
