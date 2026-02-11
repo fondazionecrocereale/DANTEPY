@@ -63,14 +63,14 @@ class TranscriptionStatus(BaseModel):
 # Almacenamiento en memoria para transcripciones
 transcriptions = {}
 
-async def verify_recaptcha(token: str) -> bool:
+async def verify_recaptcha(token: str) -> (bool, str):
     """Verifica el token de reCAPTCHA Enterprise con Google"""
     if not RECAPTCHA_API_KEY:
         print("⚠️ RECAPTCHA_API_KEY no configurada. Saltando verificación (Modo desarrollo).")
-        return True
+        return True, "Modo desarrollo - Sin verificación"
     
     if not token:
-        return False
+        return False, "Token no proporcionado"
         
     try:
         url = f"https://recaptchaenterprise.googleapis.com/v1/projects/{RECAPTCHA_PROJECT_ID}/assessments?key={RECAPTCHA_API_KEY}"
@@ -84,18 +84,25 @@ async def verify_recaptcha(token: str) -> bool:
 
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload)
+            
+            if response.status_code != 200:
+                print(f"Error en API Google: {response.status_code} - {response.text}")
+                return False, f"Error en API Google: {response.text}"
+                
             result = response.json()
             
             # Verificar validez del token
             token_props = result.get("tokenProperties", {})
             if not token_props.get("valid", False):
-                print(f"Token inválido: {token_props.get('invalidReason')}")
-                return False
+                reason = token_props.get('invalidReason', 'Razón desconocida')
+                print(f"Token inválido: {reason}")
+                return False, f"Token inválido: {reason}"
                 
             # Verificar acción
-            if token_props.get("action") != "TRANSCRIPTION":
-                print(f"Acción inválida: {token_props.get('action')}")
-                return False
+            action = token_props.get("action")
+            if action != "TRANSCRIPTION":
+                print(f"Acción inválida: {action}")
+                return False, f"Acción inválida: Esperaba 'TRANSCRIPTION', recibió '{action}'"
 
             # Verificar score (0.0 a 1.0, donde 1.0 es muy probable humano)
             risk_analysis = result.get("riskAnalysis", {})
@@ -103,13 +110,17 @@ async def verify_recaptcha(token: str) -> bool:
             print(f"reCAPTCHA Score: {score}")
             
             # Umbral de aceptación (ajustable)
-            return score >= 0.5
+            if score < 0.5:
+                # Opcional: registrar razones de bajo score
+                reasons = risk_analysis.get("reasons", [])
+                return False, f"Score bajo ({score}). Razones: {reasons}"
+            
+            return True, "Verificación exitosa"
 
     except Exception as e:
         print(f"Error verificando reCAPTCHA Enterprise: {e}")
-        # En caso de error de API, decidimos si bloquear o permitir (fail-open vs fail-close)
-        # Por seguridad default: False, pero en prod a veces se prefiere True para no bloquear usuarios si Google falla.
-        return False
+        # En caso de error de excepción, devolver el error exacto
+        return False, f"Error de excepción: {str(e)}"
 
 @app.get("/health")
 async def health_check():
@@ -118,9 +129,9 @@ async def health_check():
 @app.post("/transcribe", response_model=TranscriptionResponse)
 async def start_transcription(request: TranscriptionRequest, background_tasks: BackgroundTasks):
     # Verificar reCAPTCHA
-    is_human = await verify_recaptcha(request.recaptcha_token)
+    is_human, reason = await verify_recaptcha(request.recaptcha_token)
     if not is_human:
-        raise HTTPException(status_code=400, detail="Fallo en verificación de reCAPTCHA")
+        raise HTTPException(status_code=400, detail=f"Fallo en verificación de reCAPTCHA: {reason}")
 
     # Generar ID único
     task_id = str(uuid.uuid4())
