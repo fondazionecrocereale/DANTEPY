@@ -32,6 +32,9 @@ app.add_middleware(
 
 # Configuración
 GO_API_URL = os.getenv("GO_API_URL", "https://dantexxi-api.onrender.com")
+RECAPTCHA_API_KEY = os.environ.get("RECAPTCHA_API_KEY")
+RECAPTCHA_PROJECT_ID = os.environ.get("RECAPTCHA_PROJECT_ID", "dantexxi-487118")
+RECAPTCHA_SITE_KEY = "6LfaFWgsAAAAADbdUxhgDjwbfX6UNT1G8148TIxZ"
 
 # Modelos Pydantic
 class TranscriptionRequest(BaseModel):
@@ -39,6 +42,7 @@ class TranscriptionRequest(BaseModel):
     type: str = "youtube"
     language: str = "it"
     save_to_db: bool = True
+    recaptcha_token: Optional[str] = None
 
 class CreateReelRequest(BaseModel):
     url: str
@@ -59,12 +63,65 @@ class TranscriptionStatus(BaseModel):
 # Almacenamiento en memoria para transcripciones
 transcriptions = {}
 
+async def verify_recaptcha(token: str) -> bool:
+    """Verifica el token de reCAPTCHA Enterprise con Google"""
+    if not RECAPTCHA_API_KEY:
+        print("⚠️ RECAPTCHA_API_KEY no configurada. Saltando verificación (Modo desarrollo).")
+        return True
+    
+    if not token:
+        return False
+        
+    try:
+        url = f"https://recaptchaenterprise.googleapis.com/v1/projects/{RECAPTCHA_PROJECT_ID}/assessments?key={RECAPTCHA_API_KEY}"
+        payload = {
+            "event": {
+                "token": token,
+                "siteKey": RECAPTCHA_SITE_KEY,
+                "expectedAction": "TRANSCRIPTION"
+            }
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload)
+            result = response.json()
+            
+            # Verificar validez del token
+            token_props = result.get("tokenProperties", {})
+            if not token_props.get("valid", False):
+                print(f"Token inválido: {token_props.get('invalidReason')}")
+                return False
+                
+            # Verificar acción
+            if token_props.get("action") != "TRANSCRIPTION":
+                print(f"Acción inválida: {token_props.get('action')}")
+                return False
+
+            # Verificar score (0.0 a 1.0, donde 1.0 es muy probable humano)
+            risk_analysis = result.get("riskAnalysis", {})
+            score = risk_analysis.get("score", 0.0)
+            print(f"reCAPTCHA Score: {score}")
+            
+            # Umbral de aceptación (ajustable)
+            return score >= 0.5
+
+    except Exception as e:
+        print(f"Error verificando reCAPTCHA Enterprise: {e}")
+        # En caso de error de API, decidimos si bloquear o permitir (fail-open vs fail-close)
+        # Por seguridad default: False, pero en prod a veces se prefiere True para no bloquear usuarios si Google falla.
+        return False
+
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "transcription-api"}
 
 @app.post("/transcribe", response_model=TranscriptionResponse)
 async def start_transcription(request: TranscriptionRequest, background_tasks: BackgroundTasks):
+    # Verificar reCAPTCHA
+    is_human = await verify_recaptcha(request.recaptcha_token)
+    if not is_human:
+        raise HTTPException(status_code=400, detail="Fallo en verificación de reCAPTCHA")
+
     # Generar ID único
     task_id = str(uuid.uuid4())
     

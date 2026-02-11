@@ -310,14 +310,23 @@ class VideoTranscriber:
                 'logger': YtDlpLogger(status_callback)
             }
 
-            # Configurar cookies si existen. 
-            # OAuth2 ya no es soportado por youtube/yt-dlp, así que si no hay cookies dependemos de la suerte/IP limpia.
+            # Configurar cookies.
+            # 1. Intentar archivo local, secrets o variable de entorno
             cookie_file = self._get_cookiefile()
+            
             if cookie_file:
                 ydl_opts['cookiefile'] = cookie_file
             else:
-                print("ℹ️ No se encontraron cookies locales. Intentando descarga directa sin autenticación.")
-                print("⚠️ ATENCIÓN: Si falla con 'Sign in to confirm you’re not a bot', necesitas configurar YOUTUBE_COOKIES.")
+                # 2. Si no hay archivo, intentar usar cookies del navegador (Chrome por defecto)
+                # Esto es útil para ejecución local donde el usuario está logueado en Chrome
+                print("ℹ️ No se encontraron cookies en archivo (cookies.txt/YOUTUBE_COOKIES).")
+                print("ℹ️ Intentando extraer cookies del navegador Chrome...")
+                try:
+                    # 'cookiesfrombrowser': ('chrome', )  # Tupla con nombre del navegador
+                    ydl_opts['cookiesfrombrowser'] = ('chrome', ) 
+                except Exception as e:
+                    print(f"⚠️ Error configurando cookies del navegador: {e}")
+                    print("⚠️ La descarga podría fallar por bot detection.")
 
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
