@@ -55,11 +55,16 @@ class VideoTranscriber:
         1. Archivo 'cookies.txt' en el directorio actual.
         2. Contenido en variable de entorno 'YOUTUBE_COOKIES'.
         """
-        # 1. Buscar cookies.txt en directorio local
         local_cookies = os.path.join(os.getcwd(), 'cookies.txt')
         if os.path.exists(local_cookies):
             print(f"✅ Usando cookies locales: {local_cookies}")
             return local_cookies
+            
+        # 2. Buscar en secrets de Render (/etc/secrets/cookies.txt)
+        render_secret_cookies = '/etc/secrets/cookies.txt'
+        if os.path.exists(render_secret_cookies):
+             print(f"✅ Usando cookies desde Secret Files (Render): {render_secret_cookies}")
+             return render_secret_cookies
         
         # 2. Buscar en variable de entorno
         cookies_content = os.environ.get('YOUTUBE_COOKIES')
@@ -299,7 +304,7 @@ class VideoTranscriber:
                 # Additional options for problematic videos
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['ios', 'android', 'web'],
+                        'player_client': ['web', 'android'],
                     }
                 },
                 'logger': YtDlpLogger(status_callback)
