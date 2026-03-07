@@ -335,11 +335,16 @@ async def process_reel_creation(task_id: str, request: CreateReelRequest):
         result_data['name'] = info.get('title', result_data.get('name', 'Video sin título'))
         result_data['image'] = info.get('thumbnail', result_data.get('image', ''))
         
-        # Normalizar duración (yt-dlp devuelve segundos int/float, el json espera string formateado a veces, pero nuestro modelo backend acepta string)
+        # Normalizar duración (formato 0:00 para UI)
         duration_seconds = info.get('duration', 0)
-        result_data['duration'] = str(duration_seconds) 
+        result_data['duration'] = transcriber.format_video_duration(duration_seconds) 
         
-        # Autor
+        # Guardar categoría original de YouTube si existe
+        categories = info.get('categories', [])
+        if categories:
+            result_data['category'] = categories[0]
+        else:
+            result_data['category'] = "transcripción"
         result_data['author'] = info.get('uploader', result_data.get('author', 'Unknown Author'))
         
         transcriptions[task_id]["result"] = result_data

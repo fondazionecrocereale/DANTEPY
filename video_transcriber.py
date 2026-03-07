@@ -49,16 +49,19 @@ class VideoTranscriber:
         self.cookie_temp_file = None
 
     def _get_cookiefile(self):
-        """
-        Obtiene el archivo de cookies.
-        Prioridad:
-        1. Archivo 'cookies.txt' en el directorio actual.
-        2. Contenido en variable de entorno 'YOUTUBE_COOKIES'.
-        """
-        local_cookies = os.path.join(os.getcwd(), 'cookies.txt')
+        """Obtiene el archivo de cookies."""
+        # 1. Buscar en el mismo directorio que el script
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        local_cookies = os.path.join(script_dir, 'cookies.txt')
         if os.path.exists(local_cookies):
             print(f"✅ Usando cookies locales: {local_cookies}")
             return local_cookies
+            
+        # 1b. También buscar en el directorio actual (por si acaso)
+        cwd_cookies = os.path.join(os.getcwd(), 'cookies.txt')
+        if os.path.exists(cwd_cookies) and cwd_cookies != local_cookies:
+            print(f"✅ Usando cookies del CWD: {cwd_cookies}")
+            return cwd_cookies
             
         # 2. Buscar en secrets de Render (/etc/secrets/cookies.txt)
         render_secret_cookies = '/etc/secrets/cookies.txt'
@@ -272,98 +275,95 @@ class VideoTranscriber:
         if output_path is None:
             output_path = os.path.join(self.temp_dir, "audio.wav")
             
-        # Try multiple format options in order of preference
-        format_options = [
-            'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
-            'bestaudio/best',
-            'best[height<=480]/best'
-        ]
+        # Selector robusto: busca 480p, de lo contrario lo mejor disponible
+        ydl_opts = {
+            'format': 'bestvideo[height<=480]+bestaudio/best[height<=480]/bestvideo+bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'wav',
+                'preferredquality': '192',
+            }],
+            'outtmpl': output_path.replace('.wav', ''),
+            'nocheckcertificate': True,
+            'ignoreerrors': False,
+            'no_warnings': False,
+            'quiet': False,
+            'verbose': True,
+            'extract_flat': False,
+            'skip_download': False,
+            'age_limit': None,
+            'geo_bypass': True,
+            'geo_bypass_country': 'US',
+            'source_address': '0.0.0.0',
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web', 'android', 'ios', 'mweb'],
+                }
+            },
+            'logger': YtDlpLogger(status_callback)
+        }
 
-        for fmt in format_options:
-            ydl_opts = {
-                'format': fmt,
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'wav',
-                    'preferredquality': '192',
-                }],
-                'outtmpl': output_path.replace('.wav', ''),
-                # Configuraciones adicionales para evitar bloqueos
-                'nocheckcertificate': True,
-                'ignoreerrors': False,
-                'no_warnings': False,
-                'quiet': False,
-                'verbose': False,
-                'extract_flat': False,
-                'skip_download': False,
-                # Opciones adicionales para YouTube
-                'age_limit': None,
-                'geo_bypass': True,
-                'geo_bypass_country': 'US',
-                'source_address': '0.0.0.0', # Force IPv4 to avoid IPv6 blocks
-                # Additional options for problematic videos
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['web', 'android'],
-                    }
-                },
-                'logger': YtDlpLogger(status_callback)
-            }
-
-            # Configurar cookies.
-            # 1. Intentar archivo local, secrets o variable de entorno
-            cookie_file = self._get_cookiefile()
-            
-            if cookie_file:
-                ydl_opts['cookiefile'] = cookie_file
-            else:
-                # 2. Si no hay archivo, intentar usar cookies del navegador (Chrome por defecto)
-                # Esto es útil para ejecución local donde el usuario está logueado en Chrome
-                print("ℹ️ No se encontraron cookies en archivo (cookies.txt/YOUTUBE_COOKIES).")
-                print("ℹ️ Intentando extraer cookies del navegador Chrome...")
-                try:
-                    # 'cookiesfrombrowser': ('chrome', )  # Tupla con nombre del navegador
-                    ydl_opts['cookiesfrombrowser'] = ('chrome', ) 
-                except Exception as e:
-                    print(f"⚠️ Error configurando cookies del navegador: {e}")
-                    print("⚠️ La descarga podría fallar por bot detection.")
-
+        # Configurar cookies
+        cookie_file = self._get_cookiefile()
+        
+        # Intentar con cookies primero (si están disponibles)
+        if cookie_file:
+            print(f"DEBUG: Intentando descarga con cookies: {cookie_file}")
+            ydl_opts['cookiefile'] = cookie_file
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    # Obtener información del video
                     info = ydl.extract_info(url, download=False)
-                    video_title = info.get('title', 'Video de YouTube')
-                    thumbnail_url = info.get('thumbnail', '')
-                    
-                    # Extract author/channel info
-                    channel_url = info.get('channel_url') or info.get('uploader_url') or ""
-                    duration = info.get('duration', 0)
-                    
-                    # Extract categories
-                    categories = info.get('categories', [])
-                    category = categories[0] if categories else "transcripción"
-                    
-                    # Descargar el audio
-                    ydl.download([url])
-
-                    # Si yt-dlp no devolvió la duración, intentar obtenerla del archivo de audio
-                    if not duration or duration == 0:
-                        try:
-                            print("⚠️ Duración no encontrada en metadatos, calculando desde el archivo de audio...")
-                            audio = AudioSegment.from_file(output_path)
-                            duration = len(audio) / 1000.0  # pydub devuelve milisegundos
-                            print(f"✅ Duración calculada: {duration} segundos")
-                        except Exception as e:
-                            print(f"Error calculando duración del audio: {e}")
-
-                    return output_path, video_title, thumbnail_url, channel_url, duration, category
+                    # Verificar si realmente hay formatos de video/audio (no solo imágenes)
+                    formats = info.get('formats', [])
+                    if any(f.get('vcodec') != 'none' or f.get('acodec') != 'none' for f in formats):
+                        video_title = info.get('title', 'Video de YouTube')
+                        thumbnail_url = info.get('thumbnail', '')
+                        channel_url = info.get('channel_url') or info.get('uploader_url') or ""
+                        duration = info.get('duration', 0)
+                        categories = info.get('categories', [])
+                        category = categories[0] if categories else "transcripción"
+                        
+                        ydl.download([url])
+                        
+                        if not duration or duration == 0:
+                            try:
+                                audio = AudioSegment.from_file(output_path)
+                                duration = len(audio) / 1000.0
+                            except: pass
+                            
+                        return output_path, video_title, thumbnail_url, channel_url, duration, category
+                    else:
+                        print("⚠️ La descarga con cookies solo encontró imágenes. Intentando sin cookies...")
             except Exception as e:
-                print(f"Intento con formato '{fmt}' falló: {e}")
-                continue
+                print(f"⚠️ El intento con cookies falló: {e}. Intentando sin cookies...")
 
-        # If all formats failed
-        print(f"Todos los formatos fallaron para la URL: {url}")
-        return None, None, None, None, 0, "transcripción"
+        # Intentar sin cookies (o como fallback)
+        print("DEBUG: Intentando descarga anónima (sin cookies)...")
+        ydl_opts.pop('cookiefile', None)
+        ydl_opts.pop('cookiesfrombrowser', None)
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                video_title = info.get('title', 'Video de YouTube')
+                thumbnail_url = info.get('thumbnail', '')
+                channel_url = info.get('channel_url') or info.get('uploader_url') or ""
+                duration = info.get('duration', 0)
+                categories = info.get('categories', [])
+                category = categories[0] if categories else "transcripción"
+                
+                ydl.download([url])
+                
+                if not duration or duration == 0:
+                    try:
+                        audio = AudioSegment.from_file(output_path)
+                        duration = len(audio) / 1000.0
+                    except: pass
+                
+                return output_path, video_title, thumbnail_url, channel_url, duration, category
+        except Exception as e:
+            print(f"La descarga anónima también falló: {e}")
+            return None, None, None, None, 0, "transcripción"
     
     # Methods split_audio_into_chunks and transcribe_audio_chunk removed (legacy code)
     
@@ -503,7 +503,6 @@ class VideoTranscriber:
         """Descarga un archivo de audio desde una URL"""
         try:
             from urllib.parse import urlparse, unquote
-            
             print("Descargando archivo de audio...")
             
             # Convertir URL de storage a descarga directa
@@ -670,7 +669,7 @@ class VideoTranscriber:
             return url
     
     def format_video_duration(self, seconds: float) -> str:
-        """Convierte segundos a formato para UI (ej: 0:26, 1:05, 12:30)"""
+        """Convierte segundos a formato para UI (minutos y segundos)"""
         if not seconds:
             return "0:00"
         
@@ -826,35 +825,83 @@ class VideoTranscriber:
              output_path = os.path.join(self.temp_dir, "%(id)s.%(ext)s")
 
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            # Selector robusto para descarga de video (prioriza 480p)
+            'format': 'bestvideo[height<=480]+bestaudio/best[height<=480]/bestvideo+bestaudio/best',
             'outtmpl': output_path,
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False,
+            'no_warnings': False,
+            'verbose': True,
+            'nocheckcertificate': True,
+            'ignoreerrors': False,
+            'geo_bypass': True,
+            'source_address': '0.0.0.0',
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web', 'android', 'ios', 'mweb'],
+                }
+            }
         }
-        
-        # Configurar cookies si existen
-        cookie_file = self._get_cookiefile()
-        if cookie_file:
-            ydl_opts['cookiefile'] = cookie_file
-        else:
-            print("ℹ️ No se encontraron cookies locales. Activando autenticación OAuth2.")
-            print("⚠️ ATENCIÓN: Si es la primera vez, busca en la consola el CÓDIGO y URL (google.com/device) para autorizar.")
-            ydl_opts['username'] = 'oauth2'
-            ydl_opts['password'] = ''
         
         ydl_opts['logger'] = YtDlpLogger(status_callback)
 
+        # 1. Intentar con cookies
+        cookie_file = self._get_cookiefile()
+        if cookie_file:
+            print(f"DEBUG: download_video_file intentando con cookies: {cookie_file}")
+            ydl_opts['cookiefile'] = cookie_file
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    print(f"Descargando video de: {youtube_url} (con cookies)")
+                    info = ydl.extract_info(youtube_url, download=True)
+                    formats = info.get('formats', [])
+                    if any(f.get('vcodec') != 'none' for f in formats):
+                        filename = ydl.prepare_filename(info)
+                        # ... validación de archivo existente ...
+                        if self._verify_downloaded_file(filename):
+                            return filename, info
+                    print("⚠️ Descarga con cookies no encontró video. Intentando sin cookies...")
+            except Exception as e:
+                print(f"⚠️ Intento con cookies falló: {e}. Intentando sin cookies...")
+
+        # 2. Intentar sin cookies
+        print("DEBUG: download_video_file intentando descarga anónima...")
+        ydl_opts.pop('cookiefile', None)
+        ydl_opts.pop('cookiesfrombrowser', None)
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            print(f"Descargando video de: {youtube_url}")
+            print(f"Descargando video de: {youtube_url} (anónimo)")
             info = ydl.extract_info(youtube_url, download=True)
             filename = ydl.prepare_filename(info)
-            print(f"Video descargado en: {filename}")
+            
+            # Verificar y buscar el archivo final (a veces cambia extensión)
+            if not os.path.exists(filename):
+                base = os.path.splitext(filename)[0]
+                import glob
+                files = glob.glob(f"{base}.*")
+                if files: filename = files[0]
+            
+            if os.path.exists(filename):
+                size = os.path.getsize(filename)
+                print(f"Video descargado en: {filename} (Tamaño: {size} bytes)")
+            else:
+                print(f"❌ ERROR: No se encontró el archivo: {filename}")
+                
             return filename, info
 
+    def _verify_downloaded_file(self, filename: str) -> bool:
+        """Verifica que el archivo exista y no esté vacío."""
+        if not os.path.exists(filename):
+            base = os.path.splitext(filename)[0]
+            import glob
+            files = glob.glob(f"{base}.*")
+            if files: filename = files[0]
+        
+        if os.path.exists(filename) and os.path.getsize(filename) > 0:
+            return True
+        return False
+
     def upload_file_to_backend(self, filepath: str, upload_endpoint: str) -> str:
-        """
-        Uploads the file to the backend and returns the public URL.
-        """
+        """Uploads the file to the backend and returns the public URL."""
         print(f"Subiendo {filepath} a {upload_endpoint}...")
         try:
             with open(filepath, 'rb') as f:
